@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { ConstraintAuditPage } from "./pages/ConstraintAuditPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -7,7 +8,7 @@ import { TaskConsolePage } from "./pages/TaskConsolePage";
 import { TargetStatePage } from "./pages/TargetStatePage";
 import type { TaskEvent, TaskRecord } from "./types/api";
 
-type AppView = "dashboard" | "tasks" | "target" | "snapshots" | "reports" | "settings";
+type AppView = "dashboard" | "tasks" | "target" | "audit" | "snapshots" | "reports" | "settings";
 
 export function App() {
   const [activeView, setActiveView] = useState<AppView>("dashboard");
@@ -20,6 +21,7 @@ export function App() {
       { key: "dashboard" as const, label: "Dashboard" },
       { key: "tasks" as const, label: "Task Console" },
       { key: "target" as const, label: "Target State" },
+      { key: "audit" as const, label: "Constraint Audit" },
       { key: "snapshots" as const, label: "Snapshots" },
       { key: "reports" as const, label: "Reports" },
       { key: "settings" as const, label: "Settings" },
@@ -57,6 +59,7 @@ export function App() {
               setActiveView("target");
             }}
             onOpenTasks={() => setActiveView("tasks")}
+            onOpenAudit={() => setActiveView("audit")}
           />
         )}
 
@@ -85,6 +88,8 @@ export function App() {
             onSelectTarget={setSelectedTarget}
           />
         )}
+
+        {activeView === "audit" && <ConstraintAuditPage />}
 
         {activeView === "snapshots" && (
           <SnapshotsPage

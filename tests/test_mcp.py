@@ -422,6 +422,60 @@ class TestMCPLifecycleManager:
         assert state.health_status == "healthy"
 
     @pytest.mark.asyncio
+    async def test_fetch_constraint_violation_returns_structured_error(self):
+        from vulnclaw.agent.context import TaskConstraints
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+
+        constraints = TaskConstraints(allowed_ports=[443], strict_mode=True)
+        manager.set_task_constraints(constraints)
+
+        result = await manager.call_tool("fetch", {"url": "http://example.com/"})
+        assert result["ok"] is False
+        assert result["error_type"] == "constraint_violation"
+        assert "Port 80" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_host_constraint_violation_returns_structured_error(self):
+        from vulnclaw.agent.context import TaskConstraints
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+
+        constraints = TaskConstraints(allowed_hosts=["example.com"], strict_mode=True)
+        manager.set_task_constraints(constraints)
+
+        result = await manager.call_tool("fetch", {"url": "https://api.example.com/"})
+        assert result["ok"] is False
+        assert result["error_type"] == "constraint_violation"
+        assert "api.example.com" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_path_constraint_violation_returns_structured_error(self):
+        from vulnclaw.agent.context import TaskConstraints
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+
+        constraints = TaskConstraints(allowed_paths=["/admin"], strict_mode=True)
+        manager.set_task_constraints(constraints)
+
+        result = await manager.call_tool("fetch", {"url": "https://example.com/login"})
+        assert result["ok"] is False
+        assert result["error_type"] == "constraint_violation"
+        assert "/login" in result["message"]
+
+    @pytest.mark.asyncio
     async def test_call_tool_returns_structured_result_for_placeholder_tool(self):
         from vulnclaw.mcp.lifecycle import MCPLifecycleManager
         from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig

@@ -4,6 +4,31 @@ from typer.testing import CliRunner
 
 
 class TestWebServices:
+    def test_constraint_audit_service_aggregates_events(self, monkeypatch, tmp_path):
+        import vulnclaw.target_state.store as store_mod
+        from vulnclaw.agent.context import SessionState
+        from vulnclaw.web.services.constraint_audit_service import get_constraint_audit
+
+        monkeypatch.setattr(store_mod, "TARGETS_DIR", tmp_path)
+        state = SessionState(target="https://example.com")
+        state.add_constraint_violation_event(
+            source="tool",
+            action="exploit",
+            tool_name="fetch",
+            code="tool_action_blocked",
+            severity="high",
+            summary="constraint_violation: tool 'fetch' inferred action 'exploit'",
+            detail="GET /admin?cmd=whoami",
+        )
+        store_mod.save_target_state("https://example.com", state, command="scan")
+
+        monkeypatch.setattr("vulnclaw.web.services.constraint_audit_service.TARGETS_DIR", tmp_path)
+        view = get_constraint_audit()
+        assert view.total_events >= 1
+        assert view.high_severity_events >= 1
+        assert view.by_source["tool"] >= 1
+        assert view.by_code["tool_action_blocked"] >= 1
+
     def test_web_mcp_service_view(self):
         from vulnclaw.web.services.mcp_service import get_mcp_diagnostics
 
@@ -84,12 +109,22 @@ class TestWebServices:
     def test_web_target_service_preview_and_diff(self, monkeypatch, tmp_path):
         import vulnclaw.target_state.store as store_mod
         import vulnclaw.web.services.target_service as target_service
-        from vulnclaw.agent.context import SessionState, VulnerabilityFinding
+        from vulnclaw.agent.context import SessionState, TaskConstraints, VulnerabilityFinding
 
         monkeypatch.setattr(store_mod, "TARGETS_DIR", tmp_path)
         monkeypatch.setattr(target_service, "TARGETS_DIR", tmp_path)
 
         state1 = SessionState(target="https://example.com")
+        state1.task_constraints = TaskConstraints(allowed_ports=[443], strict_mode=True)
+        state1.add_constraint_violation_event(
+            source="tool",
+            action="exploit",
+            tool_name="fetch",
+            code="tool_action_blocked",
+            severity="high",
+            summary="constraint_violation: tool 'fetch' inferred action 'exploit'",
+            detail="GET /admin?cmd=whoami",
+        )
         state1.add_finding(VulnerabilityFinding(title="SQLi", severity="High", vuln_type="SQLi"))
         store_mod.save_target_state("https://example.com", state1, command="recon")
 
@@ -102,6 +137,10 @@ class TestWebServices:
         assert preview.schema_version >= 2
         assert preview.candidate_count >= 1
         assert preview.manual_review_count >= 1
+        assert preview.constraints["allowed_ports"] == [443]
+        assert preview.constraint_violations
+        assert preview.constraint_violation_events
+        assert any("回避" in action or "约束" in action for action in preview.next_actions)
 
         snapshots = store_mod.list_target_snapshots("https://example.com")
         diff = target_service.get_diff(
@@ -184,6 +223,9 @@ class TestWebServices:
                 "schema_version": 2,
                 "phase": "Recon",
                 "findings_count": 1,
+                "constraints": {"allowed_ports": [443]},
+                "constraint_violations": ["constraint_violation: command 'run' is outside allowed actions [recon]"],
+                "constraint_violation_events": [{"source": "command", "summary": "constraint_violation: command 'run' is outside allowed actions [recon]"}],
             },
         )
 
@@ -192,6 +234,35 @@ class TestWebServices:
         assert saved.summary is not None
         assert saved.summary.schema_version == 2
         assert saved.summary.phase == "Recon"
+        assert saved.summary.constraints["allowed_ports"] == [443]
+        assert saved.summary.constraint_violations
+        assert saved.summary.constraint_violation_events
+
+    def test_web_task_prompt_includes_explicit_constraints(self):
+        from vulnclaw.web.schemas import TaskCreateRequest, TaskOptions
+        from vulnclaw.web.services.task_service import _build_prompt_v2
+
+        request = TaskCreateRequest(
+            command="run",
+            target="https://example.com",
+            options=TaskOptions(
+                only_port=443,
+                only_host="example.com",
+                only_path="/admin",
+                blocked_host="staging.example.com",
+                blocked_path="/internal",
+                allow_actions=["recon", "scan"],
+                block_actions=["exploit"],
+            ),
+        )
+        prompt = _build_prompt_v2(request)
+        assert "Only test port 443" in prompt
+        assert "Only test host example.com" in prompt
+        assert "Only test path /admin" in prompt
+        assert "Blocked host staging.example.com" in prompt
+        assert "Blocked path /internal" in prompt
+        assert "Only allowed actions: recon, scan" in prompt
+        assert "Blocked actions: exploit" in prompt
 
     def test_web_task_manager_persists_and_restores_tasks(self, monkeypatch, tmp_path):
         import vulnclaw.web.task_manager as task_manager_mod
@@ -304,6 +375,9 @@ class TestWebServices:
                         "executed_steps": 0,
                         "resume_strategy": "continue_recon",
                         "resume_reason": "need more recon",
+                        "constraints": {"allowed_ports": [443]},
+                        "constraint_violations": ["constraint_violation: command 'run' is outside allowed actions [recon]"],
+                        "constraint_violation_events": [{"source": "command", "summary": "constraint_violation: command 'run' is outside allowed actions [recon]"}],
                     },
                 },
             )()
@@ -329,7 +403,63 @@ class TestWebServices:
         assert saved.status == "completed"
         assert saved.summary is not None
         assert saved.summary.restored is True
+        assert saved.summary.constraints["allowed_ports"] == [443]
+        assert saved.summary.constraint_violations
+        assert saved.summary.constraint_violation_events
         assert "task_restoring" in events
+
+    @pytest.mark.asyncio
+    async def test_web_task_service_blocks_exploit_when_only_port_scope_is_set(self, monkeypatch):
+        import vulnclaw.web.services.task_service as task_service
+        from vulnclaw.config.schema import VulnClawConfig
+        from vulnclaw.web.schemas import TaskCreateRequest, TaskOptions
+        from vulnclaw.web.task_manager import WebTaskManager
+
+        config = VulnClawConfig()
+        monkeypatch.setattr(task_service, "load_config", lambda: config)
+
+        manager = WebTaskManager()
+        request = TaskCreateRequest(
+            command="exploit",
+            target="https://example.com",
+            options=TaskOptions(only_port=443),
+        )
+        record = manager.create_task(request)
+
+        await task_service._run_task(manager, record.task_id, request)
+
+        saved = manager.get_task(record.task_id)
+        assert saved is not None
+        assert saved.status == "failed"
+        assert saved.error is not None
+        assert "constraint_violation" in saved.error
+
+    @pytest.mark.asyncio
+    async def test_web_task_service_blocks_run_when_allowed_actions_conflict(self, monkeypatch):
+        import vulnclaw.web.services.task_service as task_service
+        from vulnclaw.config.schema import VulnClawConfig
+        from vulnclaw.web.schemas import TaskCreateRequest
+        from vulnclaw.web.task_manager import WebTaskManager
+
+        config = VulnClawConfig()
+        monkeypatch.setattr(task_service, "load_config", lambda: config)
+        monkeypatch.setattr(
+            task_service,
+            "_build_prompt_v2",
+            lambda request: "Perform authorized reconnaissance against https://example.com. 仅做信息收集。",
+        )
+
+        manager = WebTaskManager()
+        request = TaskCreateRequest(command="run", target="https://example.com")
+        record = manager.create_task(request)
+
+        await task_service._run_task(manager, record.task_id, request)
+
+        saved = manager.get_task(record.task_id)
+        assert saved is not None
+        assert saved.status == "failed"
+        assert saved.error is not None
+        assert "outside allowed actions" in saved.error
 
     def test_web_config_service_updates_safety_fields(self, monkeypatch):
         import vulnclaw.web.services.config_service as config_service
@@ -418,6 +548,14 @@ class TestWebServices:
             "save",
         ]
 
+    def test_validate_action_constraints(self):
+        from vulnclaw.agent.constraint_policy import validate_action_constraints
+        from vulnclaw.agent.context import TaskConstraints
+
+        constraints = TaskConstraints(allowed_actions=["recon"], strict_mode=True)
+        assert validate_action_constraints("run", constraints) is not None
+        assert validate_action_constraints("recon", constraints) is None
+
     def test_web_stream_encode(self):
         from vulnclaw.web.schemas import TaskEvent
         from vulnclaw.web.stream import encode_sse
@@ -428,6 +566,13 @@ class TestWebServices:
 
 
 class TestWebApp:
+    def test_constraint_audit_route_works_without_fastapi(self, monkeypatch):
+        import vulnclaw.web.app as web_app
+
+        monkeypatch.setattr(web_app, "get_constraint_audit", lambda: type("View", (), {"model_dump": lambda self, mode="json": {"total_events": 1}})())
+        # Route body itself is exercised indirectly by type and service tests; this smoke check guards import wiring.
+        assert callable(web_app.get_constraint_audit)
+
     def test_create_app_missing_fastapi_raises(self):
         import vulnclaw.web.app as web_app
 

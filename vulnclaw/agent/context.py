@@ -194,6 +194,80 @@ class StepRecord(BaseModel):
         return f"{self.action}: {self.result}"[:80]
 
 
+class TaskConstraints(BaseModel):
+    """Structured hard constraints for an autonomous pentest task."""
+
+    allowed_ports: list[int] = Field(default_factory=list)
+    blocked_ports: list[int] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    blocked_hosts: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    blocked_paths: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    blocked_actions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    strict_mode: bool = Field(default=False)
+
+    def is_empty(self) -> bool:
+        return not any(
+            [
+                self.allowed_ports,
+                self.blocked_ports,
+                self.allowed_hosts,
+                self.blocked_hosts,
+                self.allowed_paths,
+                self.blocked_paths,
+                self.allowed_actions,
+                self.blocked_actions,
+                self.notes,
+                self.strict_mode,
+            ]
+        )
+
+    def to_prompt_block(self) -> str:
+        """Render constraints into a stable prompt block for every round."""
+        if self.is_empty():
+            return ""
+
+        lines = ["## 当前任务硬约束"]
+        if self.allowed_ports:
+            lines.append(f"- 仅允许测试端口: {', '.join(str(p) for p in self.allowed_ports)}")
+        if self.blocked_ports:
+            lines.append(f"- 禁止测试端口: {', '.join(str(p) for p in self.blocked_ports)}")
+        if self.allowed_hosts:
+            lines.append(f"- 仅允许测试主机: {', '.join(self.allowed_hosts)}")
+        if self.blocked_hosts:
+            lines.append(f"- 禁止测试主机: {', '.join(self.blocked_hosts)}")
+        if self.allowed_paths:
+            lines.append(f"- 仅允许测试路径: {', '.join(self.allowed_paths)}")
+        if self.blocked_paths:
+            lines.append(f"- 禁止测试路径: {', '.join(self.blocked_paths)}")
+        if self.allowed_actions:
+            lines.append(f"- 仅允许动作: {', '.join(self.allowed_actions)}")
+        if self.blocked_actions:
+            lines.append(f"- 禁止动作: {', '.join(self.blocked_actions)}")
+        if self.notes:
+            lines.append(f"- 其他限制: {'; '.join(self.notes)}")
+        if self.strict_mode:
+            lines.append("- 严格模式: 超出范围时只记录，不主动测试，不调用工具执行。")
+        return "\n".join(lines)
+
+
+class ConstraintViolationEvent(BaseModel):
+    """Structured audit event for a blocked constraint violation."""
+
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    kind: str = Field(default="constraint_violation")
+    code: str = Field(default="", description="Stable violation code")
+    severity: str = Field(default="medium", description="low | medium | high")
+    source: str = Field(default="", description="command | phase | tool")
+    action: str = Field(default="", description="Normalized action name")
+    tool_name: str = Field(default="", description="Tool name when source=tool")
+    phase: str = Field(default="", description="Current phase label")
+    summary: str = Field(default="", description="Human-readable summary")
+    detail: str = Field(default="", description="Detailed diagnostic message")
+
+
 class SessionState(BaseModel):
     """Full session state for a pentest engagement."""
 
@@ -202,6 +276,9 @@ class SessionState(BaseModel):
     started_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     resume_summary: str = Field(default="", description="恢复时注入的历史成果摘要")
     resume_meta: dict[str, Any] = Field(default_factory=dict, description="恢复元信息")
+    task_constraints: TaskConstraints = Field(default_factory=TaskConstraints)
+    constraint_violations: list[str] = Field(default_factory=list)
+    constraint_violation_events: list[ConstraintViolationEvent] = Field(default_factory=list)
     findings: list[VulnerabilityFinding] = Field(default_factory=list)
     recon_data: dict[str, Any] = Field(default_factory=dict)
     # ★ 原始步骤日志（向后兼容）
@@ -299,6 +376,43 @@ class SessionState(BaseModel):
             self.recon_data["subdomains"] = []
         if subdomain and subdomain not in self.recon_data["subdomains"]:
             self.recon_data["subdomains"].append(subdomain)
+
+    def add_constraint_violation(self, message: str) -> None:
+        """Record a constraint violation audit event."""
+        if not message:
+            return
+        if message not in self.constraint_violations:
+            self.constraint_violations.append(message)
+        elif self.constraint_violations and self.constraint_violations[-1] != message:
+            self.constraint_violations.append(message)
+
+        self.constraint_violations = self.constraint_violations[-20:]
+
+    def add_constraint_violation_event(
+        self,
+        *,
+        source: str,
+        action: str = "",
+        tool_name: str = "",
+        code: str = "",
+        severity: str = "medium",
+        summary: str,
+        detail: str = "",
+    ) -> None:
+        """Record a structured constraint violation audit event."""
+        event = ConstraintViolationEvent(
+            source=source,
+            action=action,
+            tool_name=tool_name,
+            code=code,
+            severity=severity,
+            phase=self.phase.value if hasattr(self.phase, "value") else str(self.phase),
+            summary=summary,
+            detail=detail or summary,
+        )
+        self.constraint_violation_events.append(event)
+        self.constraint_violation_events = self.constraint_violation_events[-20:]
+        self.add_constraint_violation(summary)
 
     def add_step(
         self,
@@ -477,6 +591,10 @@ class SessionState(BaseModel):
             "phases": phase_summaries,
             "key_findings": key_findings[:10],
         }
+
+    def get_constraints_prompt_block(self) -> str:
+        """Return a stable prompt block for current task constraints."""
+        return self.task_constraints.to_prompt_block()
 
     def _extract_action(self, step: str) -> str:
         """从步骤文本中提取简短动作描述."""

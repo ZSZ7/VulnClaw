@@ -69,6 +69,39 @@ class TestReportGenerator:
         content = Path(output).read_text(encoding="utf-8")
         assert "192.168.1.100" in content
 
+    def test_report_contains_task_constraints_summary(self, tmp_path):
+        from vulnclaw.agent.context import TaskConstraints
+        from vulnclaw.report.generator import generate_report
+
+        session = self._make_session()
+        session.task_constraints = TaskConstraints(
+            allowed_ports=[443],
+            allowed_hosts=["example.com"],
+            allowed_paths=["/admin"],
+            strict_mode=True,
+        )
+        output = str(tmp_path / "report_constraints.md")
+        generate_report(session, output)
+        content = Path(output).read_text(encoding="utf-8")
+        assert "任务约束" in content
+        assert "仅端口 443" in content
+        assert "仅主机 example.com" in content
+        assert "仅路径 /admin" in content
+
+    def test_report_contains_constraint_violation_audit(self, tmp_path):
+        from vulnclaw.report.generator import generate_report
+
+        session = self._make_session()
+        session.constraint_violations = [
+            "constraint_violation: command 'exploit' is outside allowed actions [recon]",
+            "constraint_violation: tool 'fetch' inferred action 'exploit'",
+        ]
+        output = str(tmp_path / "report_violations.md")
+        generate_report(session, output)
+        content = Path(output).read_text(encoding="utf-8")
+        assert "约束违规审计" in content
+        assert "tool 'fetch'" in content
+
     def test_report_contains_findings(self, tmp_path):
         from vulnclaw.report.generator import generate_report
         session = self._make_session()
@@ -292,7 +325,7 @@ class TestReportGenerator:
         session = self._make_session()
         monkeypatch.setattr(
             "vulnclaw.report.generator._generate_attack_summary_from_session",
-            lambda session: "?? persistent cycle ? LLM ???????",
+            lambda session: "来自 LLM 的持续渗透周期摘要",
         )
 
         output = generate_persistent_cycle_report(
@@ -305,7 +338,7 @@ class TestReportGenerator:
             output_path=str(tmp_path / "cycle_llm.md"),
         )
         content = Path(output).read_text(encoding="utf-8")
-        assert "?? persistent cycle ? LLM ???????" in content
+        assert "来自 LLM 的持续渗透周期摘要" in content
 
 
 # ── poc_builder.py ───────────────────────────────────────────────────

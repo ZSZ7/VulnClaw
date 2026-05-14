@@ -1,12 +1,14 @@
-import { useConfigQuery, useMcpDiagnosticsQuery, useReportsQuery, useTargetsQuery, useTasksQuery } from "../hooks/queries";
+import { useConfigQuery, useConstraintAuditQuery, useMcpDiagnosticsQuery, useReportsQuery, useTargetsQuery, useTasksQuery } from "../hooks/queries";
 
 interface DashboardPageProps {
   onOpenTarget: (target: string) => void;
   onOpenTasks: () => void;
+  onOpenAudit: () => void;
 }
 
-export function DashboardPage({ onOpenTarget, onOpenTasks }: DashboardPageProps) {
+export function DashboardPage({ onOpenTarget, onOpenTasks, onOpenAudit }: DashboardPageProps) {
   const configQuery = useConfigQuery();
+  const auditQuery = useConstraintAuditQuery();
   const mcpQuery = useMcpDiagnosticsQuery();
   const targetsQuery = useTargetsQuery();
   const reportsQuery = useReportsQuery();
@@ -50,11 +52,22 @@ export function DashboardPage({ onOpenTarget, onOpenTasks }: DashboardPageProps)
           <span className="stat-label">Placeholder MCP</span>
           <strong>{mcpQuery.data?.placeholder_services ?? 0}</strong>
         </article>
+        <article className="stat">
+          <span className="stat-label">Blocked Violations</span>
+          <strong>{auditQuery.data?.total_events ?? 0}</strong>
+        </article>
+        <article className="stat">
+          <span className="stat-label">High Severity Blocks</span>
+          <strong>{auditQuery.data?.high_severity_events ?? 0}</strong>
+        </article>
       </div>
 
       <div className="button-row">
         <button className="primary-btn" onClick={onOpenTasks} type="button">
           Open Task Console
+        </button>
+        <button className="secondary-btn" onClick={onOpenAudit} type="button">
+          Open Constraint Audit
         </button>
       </div>
 

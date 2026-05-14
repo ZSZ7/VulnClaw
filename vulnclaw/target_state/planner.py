@@ -13,6 +13,7 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
     recon_dims = raw.get("recon_dimensions_completed", {}) or {}
     recon_meta = raw.get("recon_meta", {}) or {}
     runtime_meta = raw.get("runtime_meta", {}) or {}
+    violation_events = raw.get("constraint_violation_events", []) or []
 
     blocked_targets = sorted(runtime_meta.get("blocked_targets", []))
     failed_targets = runtime_meta.get("failed_targets", {}) or {}
@@ -38,6 +39,8 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
             "优先复测高置信度待验证漏洞",
             "避免重新执行首页级目录枚举",
         ]
+        if violation_events:
+            next_actions.append("回避最近被约束策略阻断的动作与工具路径")
         if blocked_targets:
             next_actions.append("跳过已确认不可达目标，集中验证仍可访问的入口")
         if low_value_rounds >= 3:
@@ -67,6 +70,8 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
             "优先围绕已验证漏洞扩展利用链",
             "避免回退到低价值基础侦察",
         ]
+        if violation_events:
+            next_actions.append("扩展利用前先确认不会触发现有约束策略")
         if current_attack_path:
             next_actions.append(f"不要继续卡在旧路径 {current_attack_path}，优先扩展新后续利用")
         if recon_priority_assets:
@@ -93,6 +98,8 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
     incomplete = [key for key in active_dims if not recon_dims.get(key, False)]
     if incomplete:
         next_actions = ["补齐侦察缺口后再进入漏洞验证"]
+        if violation_events:
+            next_actions.append("优先选择未被约束阻断的信息收集动作")
         if blocked_targets:
             next_actions.append("忽略不可达子目标，优先完成仍可访问资产的侦察维度")
         if recon_priority_assets:
@@ -116,6 +123,8 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
         }
 
     next_actions = ["继续围绕已知入口点做候选验证"]
+    if violation_events:
+        next_actions.append("回避近期被约束阻断的高风险动作")
     if low_value_rounds >= 3:
         next_actions.append("避免最近失败的扫描路径，切换新的入口或不同参数面")
     if recon_priority_assets:

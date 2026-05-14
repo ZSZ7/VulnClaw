@@ -26,6 +26,7 @@ REPORT_TEMPLATE = """\
 | **测试时间** | {{ started_at }} |
 | **报告生成** | {{ generated_at }} |
 | **测试工具** | VulnClaw v{{ version }} |
+| **任务约束** | {{ task_constraints_summary }} |
 
 ## 2. 执行摘要
 
@@ -40,6 +41,9 @@ REPORT_TEMPLATE = """\
 - **待验证项**: {{ pending_verification_count }} 个
 - **需人工复核**: {{ manual_review_count }} 个
 - **攻击面**: {{ attack_surface_summary }}
+{% if constraint_violation_events or constraint_violations %}
+- **约束违规已阻断**: {{ constraint_violations|length }} 次
+{% endif %}
 
 {% if rejected_count > 0 %}
 ### 已排除的误报
@@ -158,7 +162,21 @@ REPORT_TEMPLATE = """\
 {% endfor %}
 {% endif %}
 
-## 5. 附件
+{% if constraint_violation_events or constraint_violations %}
+## 5. 约束违规审计
+
+{% if constraint_violation_events %}
+{% for item in constraint_violation_events %}
+- [{{ item.source or "unknown" }}] {{ item.summary }}
+{% endfor %}
+{% else %}
+{% for item in constraint_violations %}
+- {{ item }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+## 6. 附件
 
 - PoC 脚本: 见 `pocs/` 目录
 - 流量抓包: 见 `captures/` 目录
@@ -213,15 +231,15 @@ def generate_report(
     recommendations = []
     for finding in verified_findings:
         if finding.severity in ("Critical", "High"):
-            vt = finding.vuln_type or "???"
+            vt = finding.vuln_type or "未分类"
             if vt in seen_vuln_types:
                 continue
             seen_vuln_types.add(vt)
-            rec = finding.remediation or f"?? {vt} ??: {finding.title}"
+            rec = finding.remediation or f"请优先修复 {vt} 风险: {finding.title}"
             recommendations.append(rec)
 
     if not recommendations:
-        recommendations.append("?????????????????")
+        recommendations.append("优先复核攻击面并补充验证链路，确认高风险入口已完成修复。")
 
     if output_path is None:
         from vulnclaw.config.settings import SESSIONS_DIR
@@ -244,7 +262,7 @@ def generate_report(
     filtered_summary = ReportContentFilter.filter(llm_attack_summary) if llm_attack_summary else ""
 
     context = {
-        "target": session.target or "???",
+        "target": session.target or "unknown",
         "started_at": session.started_at,
         "generated_at": datetime.now().isoformat(),
         "version": __version__,
@@ -252,7 +270,13 @@ def generate_report(
         "high_count": severity_counts["High"],
         "medium_count": severity_counts["Medium"],
         "low_count": severity_counts["Low"] + severity_counts["Info"],
+        "task_constraints_summary": _format_task_constraints_summary(session),
         "attack_surface_summary": _summarize_attack_surface(session),
+        "constraint_violations": list(getattr(session, "constraint_violations", [])),
+        "constraint_violation_events": [
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            for item in getattr(session, "constraint_violation_events", [])
+        ],
         "key_recommendations": recommendations,
         "verified_findings": [_build_report_finding(finding) for finding in verified_findings],
         "findings": [_build_report_finding(finding) for finding in verified_findings],
@@ -764,14 +788,35 @@ def _extract_location_summary(finding: VulnerabilityFinding) -> str:
 def _build_repro_summary(finding: VulnerabilityFinding) -> str:
     parts: list[str] = []
     if finding.poc_script:
-        parts.append(f"杩愯 PoC 鑴氭湰: {finding.poc_script}")
+        parts.append(f"运行 PoC 脚本: {finding.poc_script}")
     if finding.verification_note:
-        parts.append(f"楠岃瘉璇存槑: {finding.verification_note}")
+        parts.append(f"验证说明: {finding.verification_note}")
     elif finding.evidence:
-        parts.append(f"鏍规嵁宸查獙璇佽瘉鎹鐜? {finding.evidence[:160]}")
+        parts.append(f"根据已验证证据复现: {finding.evidence[:160]}")
     if finding.verified_at:
-        parts.append(f"楠岃瘉鏃堕棿: {finding.verified_at}")
-    return "锛? ".join(parts) if parts else "鏆傛棤鍙敤澶嶇幇璇存槑"
+        parts.append(f"验证时间: {finding.verified_at}")
+    return "；".join(parts) if parts else "暂无可用复现说明"
+
+
+def _format_task_constraints_summary(session: SessionState) -> str:
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is None or constraints.is_empty():
+        return "未指定"
+
+    parts: list[str] = []
+    if constraints.allowed_ports:
+        parts.append(f"仅端口 {','.join(str(p) for p in constraints.allowed_ports)}")
+    if constraints.blocked_ports:
+        parts.append(f"禁端口 {','.join(str(p) for p in constraints.blocked_ports)}")
+    if constraints.allowed_hosts:
+        parts.append(f"仅主机 {','.join(constraints.allowed_hosts)}")
+    if constraints.allowed_paths:
+        parts.append(f"仅路径 {','.join(constraints.allowed_paths)}")
+    if constraints.allowed_actions:
+        parts.append(f"仅动作 {','.join(constraints.allowed_actions)}")
+    if constraints.blocked_actions:
+        parts.append(f"禁动作 {','.join(constraints.blocked_actions)}")
+    return "；".join(parts) if parts else "已启用约束"
 
 
 def _build_report_finding(finding: VulnerabilityFinding) -> dict[str, Any]:
@@ -798,12 +843,12 @@ def _build_report_finding(finding: VulnerabilityFinding) -> dict[str, Any]:
 def _render_verified_finding_details(findings: list[VulnerabilityFinding], heading: str) -> str:
     lines = [heading, ""]
     for idx, finding in enumerate(findings, 1):
-        location = _extract_location_summary(finding) or "鏈畾浣? / 鏈彁鍙栧埌 URL"
+        location = _extract_location_summary(finding) or "未定位 / 未提取到 URL"
         lines.append(f"### {idx}. {finding.title} [{finding.severity}]")
-        lines.append(f"- 婕忔礊绫诲瀷: {finding.vuln_type or '鏈垎绫?'}")
-        lines.append(f"- 浣嶇疆 / URL: {location}")
+        lines.append(f"- 漏洞类型: {finding.vuln_type or '未分类'}")
+        lines.append(f"- 位置 / URL: {location}")
         if finding.evidence:
-            lines.append(f"- 楠岃瘉璇佹嵁: {finding.evidence}")
-        lines.append(f"- 澶嶇幇 / PoC: {_build_repro_summary(finding)}")
+            lines.append(f"- 验证证据: {finding.evidence}")
+        lines.append(f"- 复现 / PoC: {_build_repro_summary(finding)}")
         lines.append("")
     return "\n".join(lines).rstrip()

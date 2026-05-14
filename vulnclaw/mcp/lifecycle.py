@@ -7,7 +7,9 @@ import subprocess
 import sys
 from contextlib import suppress
 from typing import Any, Optional
+from urllib.parse import urlparse
 
+from vulnclaw.agent.builtin_tools import infer_port_from_url
 from vulnclaw.config.schema import VulnClawConfig, MCPServerConfig
 from vulnclaw.mcp.registry import MCPRegistry
 
@@ -34,6 +36,102 @@ class MCPLifecycleManager:
         self._processes: dict[str, subprocess.Popen] = {}
         self._mcp_clients: dict[str, Any] = {}  # Server attach capability cache
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._task_constraints: Any = None
+
+    def set_task_constraints(self, constraints: Any) -> None:
+        """Attach current task constraints for tool-level enforcement."""
+        self._task_constraints = constraints
+
+    def _check_fetch_constraints(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        constraints = self._task_constraints
+        if constraints is None or constraints.is_empty():
+            return None
+
+        url = str(arguments.get("url", "") or "").strip()
+        if not url:
+            return None
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            parsed = None
+        host = parsed.hostname.lower() if parsed and parsed.hostname else ""
+        path = parsed.path.rstrip("/") if parsed and parsed.path else ""
+
+        port = infer_port_from_url(url)
+        if port is None:
+            port = None
+
+        if constraints.allowed_hosts and host and host not in constraints.allowed_hosts:
+            allowed_hosts = ", ".join(constraints.allowed_hosts)
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Host {host} is outside allowed scope [{allowed_hosts}] for url {url}",
+                suggestion="Adjust the task scope or send the request to an allowed host.",
+            )
+
+        if host and host in constraints.blocked_hosts:
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Host {host} is blocked by task constraints for url {url}",
+                suggestion="Remove the blocked host from the request or adjust constraints.",
+            )
+
+        if constraints.allowed_paths and path and path not in constraints.allowed_paths:
+            allowed_paths = ", ".join(constraints.allowed_paths)
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Path {path} is outside allowed scope [{allowed_paths}] for url {url}",
+                suggestion="Adjust the task scope or send the request to an allowed path.",
+            )
+
+        if path and path in constraints.blocked_paths:
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Path {path} is blocked by task constraints for url {url}",
+                suggestion="Remove the blocked path from the request or adjust constraints.",
+            )
+
+        if port is not None and constraints.allowed_ports and port not in constraints.allowed_ports:
+            allowed = ", ".join(str(p) for p in constraints.allowed_ports)
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Port {port} is outside allowed scope [{allowed}] for url {url}",
+                suggestion="Adjust the task scope or send the request to an allowed port.",
+            )
+
+        if port is not None and port in constraints.blocked_ports:
+            return self._tool_result(
+                ok=False,
+                server="fetch",
+                tool="fetch",
+                execution_mode="local",
+                error_type="constraint_violation",
+                message=f"Port {port} is blocked by task constraints for url {url}",
+                suggestion="Remove the blocked port from the request or adjust constraints.",
+            )
+
+        return None
 
     def _tool_result(
         self,
@@ -668,6 +766,10 @@ class MCPLifecycleManager:
 
         try:
             if server_name == "fetch" and tool_name == "fetch":
+                violation = self._check_fetch_constraints(arguments)
+                if violation is not None:
+                    self.registry.record_tool_call(server_name, success=False)
+                    return violation
                 content = await self._call_fetch(arguments)
                 self.registry.record_tool_call(server_name, success=True)
                 self.registry.set_server_health(server_name, "healthy")

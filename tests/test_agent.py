@@ -247,6 +247,28 @@ class TestTargetState:
         assert raw is not None
         assert "finding_meta" in raw
 
+    def test_target_state_preview_carries_structured_constraint_violation_events(self, monkeypatch, tmp_path):
+        import vulnclaw.target_state.store as store_mod
+        from vulnclaw.agent.context import SessionState
+
+        monkeypatch.setattr(store_mod, "TARGETS_DIR", tmp_path)
+        state = SessionState(target="https://example.com")
+        state.add_constraint_violation_event(
+            source="tool",
+            action="exploit",
+            tool_name="fetch",
+            code="tool_action_blocked",
+            severity="high",
+            summary="constraint_violation: tool 'fetch' inferred action 'exploit'",
+            detail="GET /admin?cmd=whoami",
+        )
+        store_mod.save_target_state("https://example.com", state, command="scan")
+
+        preview = store_mod.get_target_state_preview("https://example.com")
+        assert preview is not None
+        assert preview["constraint_violation_events"]
+        assert preview["constraint_violation_events"][0]["source"] == "tool"
+
     def test_target_state_resume_strategy_prefers_exploit_on_verified(self, monkeypatch, tmp_path):
         import vulnclaw.target_state.store as store_mod
         from vulnclaw.agent.context import SessionState, VulnerabilityFinding
@@ -887,6 +909,67 @@ class TestAgentCore:
         assert "第 2/2 轮" in round2
         assert agent.runtime.user_vuln_hint_rounds == 1
 
+    def test_extract_task_constraints_parses_allowed_ports(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("对 https://example.com 只测试 443 端口")
+        assert constraints.allowed_ports == [443]
+        assert constraints.strict_mode is True
+
+    def test_extract_task_constraints_infers_allowed_host_and_path(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("对 https://example.com/admin 只测试这个路径")
+        assert "example.com" in constraints.allowed_hosts
+        assert "/admin" in constraints.allowed_paths
+        assert constraints.strict_mode is True
+
+    def test_round_context_includes_hard_constraints(self):
+        from vulnclaw.agent.context import PentestPhase
+
+        agent = self._make_agent()
+        agent.context.state.advance_phase(PentestPhase.RECON)
+        agent._reset_runtime_state(
+            user_input="对 https://example.com 只测试 443 端口",
+            detected_phase=PentestPhase.RECON,
+        )
+
+        round1 = agent._build_round_context(1, 5)
+        round5 = agent._build_round_context(5, 5)
+
+        assert "当前任务硬约束" in round1
+        assert "仅允许测试端口: 443" in round1
+        assert "当前任务硬约束" in round5
+        assert "仅允许测试端口: 443" in round5
+
+    @pytest.mark.asyncio
+    async def test_persistent_pentest_keeps_constraints_in_followup_cycles(self):
+        agent = self._make_agent()
+        captured_inputs = []
+
+        async def _fake_auto_pentest(*args, **kwargs):
+            captured_inputs.append(kwargs.get("user_input", args[0] if args else ""))
+            from vulnclaw.agent.runtime_state import AgentResult
+            return [AgentResult(output="cycle", should_continue=False)]
+
+        agent.auto_pentest = _fake_auto_pentest
+        agent._reset_runtime_state(
+            user_input="对 https://example.com 只测试 443 端口",
+            detected_phase=agent._detect_phase("信息收集"),
+        )
+        agent.context.state.target = "https://example.com"
+
+        await agent.persistent_pentest(
+            "对 https://example.com 只测试 443 端口",
+            max_cycles=2,
+            rounds_per_cycle=1,
+        )
+
+        assert len(captured_inputs) == 2
+        assert "只测试 443 端口" in captured_inputs[0]
+        assert "当前任务硬约束" in captured_inputs[1]
+        assert "仅允许测试端口: 443" in captured_inputs[1]
+
     def test_reset_runtime_state_clears_previous_run_contamination(self):
         from vulnclaw.agent.context import PentestPhase
 
@@ -942,6 +1025,20 @@ class TestAgentCore:
             "domain": False,
             "personnel": False,
         }
+
+    def test_reset_runtime_state_preserves_existing_constraints_when_new_input_has_none(self):
+        from vulnclaw.agent.context import PentestPhase, TaskConstraints
+
+        agent = self._make_agent()
+        agent.context.state.task_constraints = TaskConstraints(allowed_ports=[443], strict_mode=True)
+
+        agent._reset_runtime_state(
+            user_input="[Persistent Cycle 2] 继续对目标 https://example.com 进行渗透测试。",
+            detected_phase=PentestPhase.RECON,
+        )
+
+        assert agent.runtime.task_constraints.allowed_ports == [443]
+        assert agent.context.state.task_constraints.allowed_ports == [443]
 
 
 class TestAgentCoreLoop:
@@ -1396,6 +1493,44 @@ class TestAgentCoreLoop:
         assert agent.runtime.rounds_without_progress >= 3
         # Should still stop at max_rounds (no [DONE])
         assert len(results) == 5
+
+    @pytest.mark.asyncio
+    async def test_auto_pentest_blocks_phase_transition_when_action_not_allowed(self, monkeypatch):
+        agent = self._make_agent()
+        from vulnclaw.agent import loop_controller
+
+        async def _fake_call_llm_auto(agent_obj, system_prompt, round_context):
+            return "信息收集完成，切换到漏洞利用。\nphase: exploitation"
+
+        monkeypatch.setattr(loop_controller, "call_llm_auto", _fake_call_llm_auto)
+        results = await agent.auto_pentest(
+            "对 https://example.com 做信息收集。 Only allowed actions: recon",
+            max_rounds=3,
+        )
+
+        assert len(results) == 1
+        assert results[0].should_continue is False
+        assert "constraint_violation" in results[0].output
+        assert agent.context.state.phase.value == "信息收集"
+
+    def test_constraint_policy_normalizes_actions_and_validates_phase(self):
+        from vulnclaw.agent.constraint_policy import (
+            infer_tool_action,
+            normalize_action_name,
+            validate_action_constraints,
+            validate_phase_transition,
+            validate_tool_action,
+        )
+        from vulnclaw.agent.context import PentestPhase, TaskConstraints
+
+        constraints = TaskConstraints(allowed_actions=["recon"], strict_mode=True)
+        assert normalize_action_name("reporting") == "report"
+        assert validate_action_constraints("run", constraints) is not None
+        assert validate_action_constraints("recon", constraints) is None
+        assert validate_phase_transition(PentestPhase.EXPLOITATION, constraints) is not None
+        assert infer_tool_action("nmap_scan", {"target": "example.com"}) == "recon"
+        assert infer_tool_action("fetch", {"url": "https://example.com/login?id=1' OR 1=1--"}) == "exploit"
+        assert validate_tool_action("fetch", {"url": "https://example.com/login?id=1' OR 1=1--"}, constraints) is not None
 
     @pytest.mark.asyncio
     async def test_auto_pentest_blocks_repeatedly_failed_target(self, monkeypatch):

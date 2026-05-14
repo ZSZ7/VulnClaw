@@ -27,6 +27,13 @@ export function TaskConsolePage({
   const [maxCycles, setMaxCycles] = useState<number | "">("");
   const [cve, setCve] = useState("");
   const [cmd, setCmd] = useState("");
+  const [onlyPort, setOnlyPort] = useState<number | "">("");
+  const [onlyHost, setOnlyHost] = useState("");
+  const [onlyPath, setOnlyPath] = useState("");
+  const [blockedHost, setBlockedHost] = useState("");
+  const [blockedPath, setBlockedPath] = useState("");
+  const [allowActions, setAllowActions] = useState("");
+  const [blockActions, setBlockActions] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +74,13 @@ export function TaskConsolePage({
         max_cycles: maxCycles === "" ? undefined : maxCycles,
         cve: cve.trim() || undefined,
         cmd: cmd.trim() || undefined,
+        only_port: onlyPort === "" ? undefined : onlyPort,
+        only_host: onlyHost.trim() || undefined,
+        only_path: onlyPath.trim() || undefined,
+        blocked_host: blockedHost.trim() || undefined,
+        blocked_path: blockedPath.trim() || undefined,
+        allow_actions: allowActions.trim() ? allowActions.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+        block_actions: blockActions.trim() ? blockActions.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
       });
       onTaskCreated(task);
       onFocusTarget(task.target);
@@ -150,6 +164,39 @@ export function TaskConsolePage({
           <span>CVE Hint</span>
           <input value={cve} onChange={(event) => setCve(event.target.value)} placeholder="exploit only" />
         </label>
+        <label className="field">
+          <span>Only Port</span>
+          <input
+            type="number"
+            value={onlyPort}
+            onChange={(event) => setOnlyPort(event.target.value ? Number(event.target.value) : "")}
+            placeholder="e.g. 443"
+          />
+        </label>
+        <label className="field">
+          <span>Only Host</span>
+          <input value={onlyHost} onChange={(event) => setOnlyHost(event.target.value)} placeholder="example.com" />
+        </label>
+        <label className="field field-wide">
+          <span>Only Path</span>
+          <input value={onlyPath} onChange={(event) => setOnlyPath(event.target.value)} placeholder="/admin" />
+        </label>
+        <label className="field">
+          <span>Blocked Host</span>
+          <input value={blockedHost} onChange={(event) => setBlockedHost(event.target.value)} placeholder="staging.example.com" />
+        </label>
+        <label className="field">
+          <span>Blocked Path</span>
+          <input value={blockedPath} onChange={(event) => setBlockedPath(event.target.value)} placeholder="/internal" />
+        </label>
+        <label className="field">
+          <span>Allow Actions</span>
+          <input value={allowActions} onChange={(event) => setAllowActions(event.target.value)} placeholder="recon,scan" />
+        </label>
+        <label className="field">
+          <span>Block Actions</span>
+          <input value={blockActions} onChange={(event) => setBlockActions(event.target.value)} placeholder="exploit,persistent" />
+        </label>
         <label className="field field-wide">
           <span>Command Hint</span>
           <input value={cmd} onChange={(event) => setCmd(event.target.value)} placeholder="verification command, e.g. id" />
@@ -184,6 +231,9 @@ export function TaskConsolePage({
                 <strong>{task.command} · {task.target}</strong>
                 <span>{task.status}</span>
                 <span className="muted-inline">{task.latest_phase ?? task.created_at}</span>
+                {task.summary?.constraints && Object.keys(task.summary.constraints).length > 0 && (
+                  <span className="muted-inline">constraints={JSON.stringify(task.summary.constraints)}</span>
+                )}
               </button>
             ))}
             {!tasksQuery.data?.length && <div className="empty-state">No task records yet.</div>}
@@ -199,6 +249,9 @@ export function TaskConsolePage({
                 <div className="terminal-line">[command] {activeTask.command}</div>
                 <div className="terminal-line">[target] {activeTask.target}</div>
                 <div className="terminal-line dim">[phase] {activeTask.latest_phase ?? "unknown"}</div>
+                {activeTask.summary?.constraints && Object.keys(activeTask.summary.constraints).length > 0 && (
+                  <div className="terminal-line dim">[constraints] {JSON.stringify(activeTask.summary.constraints)}</div>
+                )}
               </>
             ) : (
               <div className="terminal-line dim">No active task yet.</div>

@@ -166,6 +166,9 @@ def get_target_state_preview(target: str, snapshot_id: Optional[str] = None) -> 
         "recent_failed_steps": plan.get("recent_failed_steps", []),
         "next_actions": plan.get("next_actions", []),
         "low_value_rounds": plan.get("low_value_rounds", 0),
+        "constraints": raw.get("task_constraints", {}) if isinstance(raw.get("task_constraints"), dict) else {},
+        "constraint_violations": raw.get("constraint_violations", []) if isinstance(raw.get("constraint_violations"), list) else [],
+        "constraint_violation_events": raw.get("constraint_violation_events", []) if isinstance(raw.get("constraint_violation_events"), list) else [],
     }
 
 
@@ -267,6 +270,12 @@ def build_task_session_summary(
         "executed_steps": len(session.executed_steps),
         "resume_strategy": resume_meta.get("resume_strategy", ""),
         "resume_reason": resume_meta.get("resume_strategy_reason", ""),
+        "constraints": session.task_constraints.model_dump(mode="json") if hasattr(session, "task_constraints") else {},
+        "constraint_violations": list(getattr(session, "constraint_violations", [])),
+        "constraint_violation_events": [
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            for item in getattr(session, "constraint_violation_events", [])
+        ],
     }
 
 
@@ -399,6 +408,39 @@ def _merge_target_state(existing: dict[str, Any], current: dict[str, Any]) -> di
     existing_notes = existing.get("notes", [])
     current_notes = current.get("notes", [])
     merged["notes"] = existing_notes + [note for note in current_notes if note not in existing_notes]
+
+    existing_constraints = existing.get("task_constraints", {})
+    current_constraints = current.get("task_constraints", {})
+    if isinstance(existing_constraints, dict) and isinstance(current_constraints, dict):
+        if any(current_constraints.values()):
+            merged["task_constraints"] = current_constraints
+        else:
+            merged["task_constraints"] = existing_constraints
+
+    existing_violations = existing.get("constraint_violations", [])
+    current_violations = current.get("constraint_violations", [])
+    if isinstance(existing_violations, list) and isinstance(current_violations, list):
+        merged["constraint_violations"] = existing_violations + [
+            item for item in current_violations if item not in existing_violations
+        ]
+
+    existing_violation_events = existing.get("constraint_violation_events", [])
+    current_violation_events = current.get("constraint_violation_events", [])
+    if isinstance(existing_violation_events, list) and isinstance(current_violation_events, list):
+        seen_event_keys = {
+            f"{item.get('timestamp', '')}:{item.get('summary', '')}:{item.get('source', '')}"
+            for item in existing_violation_events
+            if isinstance(item, dict)
+        }
+        merged_events = list(existing_violation_events)
+        for item in current_violation_events:
+            if not isinstance(item, dict):
+                continue
+            key = f"{item.get('timestamp', '')}:{item.get('summary', '')}:{item.get('source', '')}"
+            if key not in seen_event_keys:
+                merged_events.append(item)
+                seen_event_keys.add(key)
+        merged["constraint_violation_events"] = merged_events[-20:]
 
     return merged
 

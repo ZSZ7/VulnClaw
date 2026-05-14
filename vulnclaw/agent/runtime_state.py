@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from vulnclaw.agent.context import TaskConstraints
+
 
 @dataclass
 class AgentResult:
@@ -38,6 +40,7 @@ class RuntimeState:
     auto_skill_input: str = ""
     user_vuln_hint: str = ""
     user_vuln_hint_rounds: int = 0
+    task_constraints: TaskConstraints = field(default_factory=TaskConstraints)
 
     claimed_flag: Optional[str] = None
     flag_verified: bool = False

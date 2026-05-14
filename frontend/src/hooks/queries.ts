@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getConfig, getMcpDiagnostics, getReportContent, getReports, getTarget, getTargetDiff, getTargetPreview, getTargetSnapshots, getTargets, getTasks } from "../api/web";
+import { getConfig, getConstraintAudit, getMcpDiagnostics, getReportContent, getReports, getTarget, getTargetDiff, getTargetPreview, getTargetSnapshots, getTargets, getTasks } from "../api/web";
 
 export function useConfigQuery() {
   return useQuery({
@@ -13,6 +13,15 @@ export function useMcpDiagnosticsQuery() {
   return useQuery({
     queryKey: ["mcp-diagnostics"],
     queryFn: getMcpDiagnostics,
+    staleTime: 15_000,
+    refetchInterval: 15_000,
+  });
+}
+
+export function useConstraintAuditQuery() {
+  return useQuery({
+    queryKey: ["constraint-audit"],
+    queryFn: getConstraintAudit,
     staleTime: 15_000,
     refetchInterval: 15_000,
   });

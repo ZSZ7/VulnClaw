@@ -43,6 +43,9 @@ export interface TargetView {
   manual_review_count: number;
   resume_strategy: string;
   resume_reason: string;
+  constraints: Record<string, unknown>;
+  constraint_violations: string[];
+  constraint_violation_events: Record<string, unknown>[];
   raw: Record<string, unknown>;
 }
 
@@ -78,6 +81,9 @@ export interface TargetPreviewView {
   recent_failed_steps: string[];
   next_actions: string[];
   low_value_rounds: number;
+  constraints: Record<string, unknown>;
+  constraint_violations: string[];
+  constraint_violation_events: Record<string, unknown>[];
 }
 
 export interface TargetStateDiffView {
@@ -117,6 +123,31 @@ export interface TaskOptions {
   max_cycles?: number;
   cve?: string;
   cmd?: string;
+  only_port?: number;
+  only_host?: string;
+  only_path?: string;
+  blocked_host?: string;
+  blocked_path?: string;
+  allow_actions?: string[];
+  block_actions?: string[];
+}
+
+export interface TaskSummary {
+  target: string;
+  command: TaskCommand;
+  restored: boolean;
+  snapshot_id: string;
+  schema_version: number;
+  phase?: string;
+  findings_count: number;
+  verified_count: number;
+  pending_count: number;
+  executed_steps: number;
+  resume_strategy: string;
+  resume_reason: string;
+  constraints: Record<string, unknown>;
+  constraint_violations: string[];
+  constraint_violation_events: Record<string, unknown>[];
 }
 
 export interface TaskRecord {
@@ -133,6 +164,7 @@ export interface TaskRecord {
   options: TaskOptions;
   latest_phase?: string | null;
   latest_message?: string | null;
+  summary?: TaskSummary | null;
 }
 
 export interface TaskEvent {
@@ -171,4 +203,25 @@ export interface MCPDiagnosticsView {
   placeholder_services: number;
   tool_count: number;
   services: MCPServiceView[];
+}
+
+export interface ConstraintAuditEventView {
+  target: string;
+  timestamp: string;
+  code: string;
+  severity: string;
+  source: string;
+  action: string;
+  tool_name: string;
+  phase: string;
+  summary: string;
+  detail: string;
+}
+
+export interface ConstraintAuditView {
+  total_events: number;
+  high_severity_events: number;
+  by_source: Record<string, number>;
+  by_code: Record<string, number>;
+  recent_events: ConstraintAuditEventView[];
 }

@@ -1,4 +1,4 @@
-﻿"""VulnClaw CLI 鈥?main entry point with REPL and sub-commands."""
+"""VulnClaw CLI main entry point with REPL and sub-commands."""
 
 from __future__ import annotations
 
@@ -7,14 +7,34 @@ import os
 import sys
 from typing import Optional
 
-# Fix Windows console encoding for emoji/unicode output
-if sys.platform == "win32":
+def _configure_windows_console() -> None:
+    """Force UTF-8 console I/O on Windows for reliable Unicode output."""
+    if sys.platform != "win32":
+        return
+
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
+
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleCP(65001)
+        kernel32.SetConsoleOutputCP(65001)
     except Exception:
         pass
+
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+_configure_windows_console()
 
 import typer
 from rich.console import Console
@@ -24,7 +44,9 @@ from rich.text import Text
 from vulnclaw import __version__
 from vulnclaw.config.settings import load_config, set_config_value, save_config, apply_provider_preset, list_providers
 from vulnclaw.agent.core import strip_think_tags, format_think_tags
+from vulnclaw.agent.input_analysis import extract_task_constraints
 from vulnclaw.orchestrator import run_agent_task
+from vulnclaw.orchestrator import validate_action_constraints
 from vulnclaw.repl_runner import run_repl_call
 from vulnclaw.target_state.store import (
     apply_target_state_to_agent,
@@ -332,10 +354,10 @@ def _run_repl() -> None:
                 console.print("[*] Thinking visibility: [yellow]hidden[/]")
                 continue
 
-            # Route to agent 鈥?detect if this should be an autonomous loop
+            # Route to agent and detect whether this should be an autonomous loop
             is_auto_mode = _should_auto_pentest(user_input, current_target)
 
-            # Detect target switch 鈥?if user mentions a new target, reset context
+            # Detect target switch and reset context if the user mentions a new target
             new_target = _extract_target_from_input(user_input)
             if new_target and current_target and new_target != current_target:
                 console.print(f"[dim][*] Target switch: {current_target} -> {new_target}, resetting session context[/]")
@@ -505,6 +527,41 @@ def _generate_report_for_target(
     return str(path)
 
 
+def _append_cli_constraints(
+    prompt: str,
+    only_port: Optional[int],
+    only_host: Optional[str],
+    only_path: Optional[str],
+    blocked_host: Optional[str] = None,
+    blocked_path: Optional[str] = None,
+) -> str:
+    constraints = []
+    if only_port is not None:
+        constraints.append(f"Only test port {only_port}")
+    if only_host:
+        constraints.append(f"Only test host {only_host}")
+    if only_path:
+        constraints.append(f"Only test path {only_path}")
+    if blocked_host:
+        constraints.append(f"Blocked host {blocked_host}")
+    if blocked_path:
+        constraints.append(f"Blocked path {blocked_path}")
+    if not constraints:
+        return prompt
+    return f"{prompt} {' '.join(constraints)}."
+
+
+def _append_action_constraints(prompt: str, allow_actions: Optional[str], block_actions: Optional[str]) -> str:
+    constraints = []
+    if allow_actions:
+        constraints.append(f"Only allowed actions: {allow_actions}")
+    if block_actions:
+        constraints.append(f"Blocked actions: {block_actions}")
+    if not constraints:
+        return prompt
+    return f"{prompt} {' '.join(constraints)}."
+
+
 async def _run_cli_orchestrated_task(
     *,
     command: str,
@@ -546,6 +603,13 @@ def run(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
     scope: str = typer.Option("full", help="Test scope: full, web, api, mobile"),
     output: Optional[str] = typer.Option(None, help="Output report file path"),
+    only_port: Optional[int] = typer.Option(None, "--only-port", help="Restrict testing to a single port"),
+    only_host: Optional[str] = typer.Option(None, "--only-host", help="Restrict testing to a single host"),
+    only_path: Optional[str] = typer.Option(None, "--only-path", help="Restrict testing to a single path"),
+    blocked_host: Optional[str] = typer.Option(None, "--blocked-host", help="Explicitly blocked host"),
+    blocked_path: Optional[str] = typer.Option(None, "--blocked-path", help="Explicitly blocked path"),
+    allow_actions: Optional[str] = typer.Option(None, "--allow-actions", help="Comma-separated allowed actions"),
+    block_actions: Optional[str] = typer.Option(None, "--block-actions", help="Comma-separated blocked actions"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume previous target state"),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", help="Resume from a specific target snapshot id"),
 ) -> None:
@@ -561,6 +625,12 @@ def run(
         f"Perform an authorized {scope} pentest against {target}. "
         "This target is in scope and explicitly authorized."
     )
+    prompt = _append_cli_constraints(prompt, only_port, only_host, only_path, blocked_host, blocked_path)
+    prompt = _append_action_constraints(prompt, allow_actions, block_actions)
+    violation = validate_action_constraints("run", extract_task_constraints(prompt))
+    if violation is not None:
+        err_console.print(f"[!] {violation}")
+        raise typer.Exit(1)
 
     async def _run():
         async def runner(agent, shared_config):
@@ -591,6 +661,13 @@ def persistent(
     rounds: int = typer.Option(0, "--rounds", "-r", help="Rounds per cycle (0=use config, default 100)"),
     cycles: int = typer.Option(0, "--cycles", "-c", help="Max cycles (0=use config, default 10)"),
     no_report: bool = typer.Option(False, "--no-report", help="Disable auto report after each cycle"),
+    only_port: Optional[int] = typer.Option(None, "--only-port", help="Restrict testing to a single port"),
+    only_host: Optional[str] = typer.Option(None, "--only-host", help="Restrict testing to a single host"),
+    only_path: Optional[str] = typer.Option(None, "--only-path", help="Restrict testing to a single path"),
+    blocked_host: Optional[str] = typer.Option(None, "--blocked-host", help="Explicitly blocked host"),
+    blocked_path: Optional[str] = typer.Option(None, "--blocked-path", help="Explicitly blocked path"),
+    allow_actions: Optional[str] = typer.Option(None, "--allow-actions", help="Comma-separated allowed actions"),
+    block_actions: Optional[str] = typer.Option(None, "--block-actions", help="Comma-separated blocked actions"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume previous target state"),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", help="Resume from a specific target snapshot id"),
 ) -> None:
@@ -602,7 +679,7 @@ def persistent(
         err_console.print("[!] Configure an LLM API key first.")
         raise typer.Exit(1)
 
-    # Resolve parameters (CLI override 鈫?config defaults)
+    # Resolve parameters (CLI override -> config defaults)
     rounds_per_cycle = rounds if rounds > 0 else config.session.persistent_rounds_per_cycle
     max_cycles = cycles if cycles > 0 else config.session.persistent_max_cycles
     auto_report = not no_report if no_report else config.session.persistent_auto_report
@@ -621,6 +698,12 @@ def persistent(
         f"Perform an authorized persistent penetration test against {target}. "
         "This target is in scope and explicitly authorized."
     )
+    prompt = _append_cli_constraints(prompt, only_port, only_host, only_path, blocked_host, blocked_path)
+    prompt = _append_action_constraints(prompt, allow_actions, block_actions)
+    violation = validate_action_constraints("persistent", extract_task_constraints(prompt))
+    if violation is not None:
+        err_console.print(f"[!] {violation}")
+        raise typer.Exit(1)
 
     # Track stats
     all_cycle_results: list[PersistentCycleResult] = []
@@ -702,11 +785,24 @@ def persistent(
 @app.command()
 def recon(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
+    only_port: Optional[int] = typer.Option(None, "--only-port", help="Restrict testing to a single port"),
+    only_host: Optional[str] = typer.Option(None, "--only-host", help="Restrict testing to a single host"),
+    only_path: Optional[str] = typer.Option(None, "--only-path", help="Restrict testing to a single path"),
+    blocked_host: Optional[str] = typer.Option(None, "--blocked-host", help="Explicitly blocked host"),
+    blocked_path: Optional[str] = typer.Option(None, "--blocked-path", help="Explicitly blocked path"),
+    allow_actions: Optional[str] = typer.Option(None, "--allow-actions", help="Comma-separated allowed actions"),
+    block_actions: Optional[str] = typer.Option(None, "--block-actions", help="Comma-separated blocked actions"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume previous target state"),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", help="Resume from a specific target snapshot id"),
 ) -> None:
     """Run reconnaissance only."""
     prompt = f"Perform authorized reconnaissance against {target} without exploitation."
+    prompt = _append_cli_constraints(prompt, only_port, only_host, only_path, blocked_host, blocked_path)
+    prompt = _append_action_constraints(prompt, allow_actions, block_actions)
+    violation = validate_action_constraints("recon", extract_task_constraints(prompt))
+    if violation is not None:
+        err_console.print(f"[!] {violation}")
+        raise typer.Exit(1)
 
     async def _run():
         async def runner(agent, _config):
@@ -730,12 +826,25 @@ def recon(
 def scan(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
     ports: Optional[str] = typer.Option(None, help="Port range, e.g. 80,443,8080"),
+    only_port: Optional[int] = typer.Option(None, "--only-port", help="Restrict testing to a single port"),
+    only_host: Optional[str] = typer.Option(None, "--only-host", help="Restrict testing to a single host"),
+    only_path: Optional[str] = typer.Option(None, "--only-path", help="Restrict testing to a single path"),
+    blocked_host: Optional[str] = typer.Option(None, "--blocked-host", help="Explicitly blocked host"),
+    blocked_path: Optional[str] = typer.Option(None, "--blocked-path", help="Explicitly blocked path"),
+    allow_actions: Optional[str] = typer.Option(None, "--allow-actions", help="Comma-separated allowed actions"),
+    block_actions: Optional[str] = typer.Option(None, "--block-actions", help="Comma-separated blocked actions"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume previous target state"),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", help="Resume from a specific target snapshot id"),
 ) -> None:
     """Run vulnerability scanning only."""
     port_hint = f", focusing on ports {ports}" if ports else ""
     prompt = f"Perform authorized vulnerability scanning against {target}{port_hint} without exploitation."
+    prompt = _append_cli_constraints(prompt, only_port, only_host, only_path, blocked_host, blocked_path)
+    prompt = _append_action_constraints(prompt, allow_actions, block_actions)
+    violation = validate_action_constraints("scan", extract_task_constraints(prompt))
+    if violation is not None:
+        err_console.print(f"[!] {violation}")
+        raise typer.Exit(1)
 
     async def _run():
         async def runner(agent, _config):
@@ -760,12 +869,25 @@ def exploit(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
     cve: Optional[str] = typer.Option(None, help="Specific CVE to exploit"),
     cmd: str = typer.Option("id", help="Command to execute for verification"),
+    only_port: Optional[int] = typer.Option(None, "--only-port", help="Restrict testing to a single port"),
+    only_host: Optional[str] = typer.Option(None, "--only-host", help="Restrict testing to a single host"),
+    only_path: Optional[str] = typer.Option(None, "--only-path", help="Restrict testing to a single path"),
+    blocked_host: Optional[str] = typer.Option(None, "--blocked-host", help="Explicitly blocked host"),
+    blocked_path: Optional[str] = typer.Option(None, "--blocked-path", help="Explicitly blocked path"),
+    allow_actions: Optional[str] = typer.Option(None, "--allow-actions", help="Comma-separated allowed actions"),
+    block_actions: Optional[str] = typer.Option(None, "--block-actions", help="Comma-separated blocked actions"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume previous target state"),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", help="Resume from a specific target snapshot id"),
 ) -> None:
     """Run exploitation only."""
     cve_hint = f" using {cve}" if cve else ""
     prompt = f"Attempt authorized exploitation against {target}{cve_hint} and verify with command: {cmd}"
+    prompt = _append_cli_constraints(prompt, only_port, only_host, only_path, blocked_host, blocked_path)
+    prompt = _append_action_constraints(prompt, allow_actions, block_actions)
+    violation = validate_action_constraints("exploit", extract_task_constraints(prompt))
+    if violation is not None:
+        err_console.print(f"[!] {violation}")
+        raise typer.Exit(1)
 
     async def _run():
         async def runner(agent, _config):
@@ -1147,7 +1269,7 @@ def target_state_clear_cmd(
     console.print(f"[+] Cleared target state: {target}")
 
 
-# 鈹€鈹€ Default command (no sub-command 鈫?REPL) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Default command (no sub-command -> REPL)
 
 # 鈹€鈹€ Auto-pentest detection 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
@@ -1157,7 +1279,7 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
 
     Triggers when:
     - User explicitly asks for a full pentest with a target
-    - User mentions a target + action keywords like "娓楅€忔祴璇?, "鎵撲竴涓?
+    - User mentions a target plus action keywords like "渗透测试" or "打一下"
     - User asks to solve a CTF / find a flag with a target
     - User asks for information gathering / recon / OSINT with a target
     - A target is present + multi-step intent indicators
@@ -1187,7 +1309,7 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
     ]
 
     # If it's clearly a single-step query, don't auto-loop
-    # But if it also has auto keywords, still go auto (e.g. "鏀堕泦淇℃伅骞剁敓鎴愭姤鍛?)
+    # But if it also has auto keywords, still go auto (e.g. "收集信息并生成报告")
     if any(kw in input_lower for kw in single_step_keywords) and not any(kw in input_lower for kw in auto_keywords):
         return False
 
@@ -1197,7 +1319,7 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
         has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
         return has_target
 
-    # 鈽?Fallback: has target + multi-step intent 鈫?auto
+    # Fallback: has target + multi-step intent -> auto
     has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
     if has_target:
         multi_step_indicators = [

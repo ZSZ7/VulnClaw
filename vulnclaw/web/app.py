@@ -6,6 +6,7 @@ from pathlib import Path
 
 from vulnclaw.web.schemas import ConfigUpdateRequest, ReportGenerateRequest, TaskCreateRequest
 from vulnclaw.web.services.config_service import get_public_config, update_public_config
+from vulnclaw.web.services.constraint_audit_service import get_constraint_audit
 from vulnclaw.web.services.mcp_service import get_mcp_diagnostics
 from vulnclaw.web.services.report_service import generate_target_report, list_reports, read_report_content
 from vulnclaw.web.services.target_service import (
@@ -87,6 +88,10 @@ def create_app():
     @app.get("/api/mcp")
     async def mcp_view():
         return get_mcp_diagnostics().model_dump(mode="json")
+
+    @app.get("/api/constraint-audit")
+    async def constraint_audit_view():
+        return get_constraint_audit().model_dump(mode="json")
 
     @app.post("/api/config")
     async def config_update(request: ConfigUpdateRequest):

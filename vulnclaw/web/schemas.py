@@ -18,6 +18,13 @@ class TaskOptions(BaseModel):
     max_cycles: Optional[int] = Field(default=None, description="Persistent mode max cycles")
     cve: Optional[str] = Field(default=None, description="Exploit command CVE hint")
     cmd: Optional[str] = Field(default=None, description="Exploit command execution hint")
+    only_port: Optional[int] = Field(default=None, description="Restrict task scope to a single port")
+    only_host: Optional[str] = Field(default=None, description="Restrict task scope to a single host")
+    only_path: Optional[str] = Field(default=None, description="Restrict task scope to a single path")
+    blocked_host: Optional[str] = Field(default=None, description="Explicitly blocked host")
+    blocked_path: Optional[str] = Field(default=None, description="Explicitly blocked path")
+    allow_actions: Optional[list[str]] = Field(default=None, description="Explicit allow-list for task actions")
+    block_actions: Optional[list[str]] = Field(default=None, description="Explicit block-list for task actions")
 
 
 class TaskCreateRequest(BaseModel):
@@ -48,6 +55,9 @@ class TaskSummary(BaseModel):
     executed_steps: int = 0
     resume_strategy: str = ""
     resume_reason: str = ""
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    constraint_violations: list[str] = Field(default_factory=list)
+    constraint_violation_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TaskRecord(BaseModel):
@@ -90,6 +100,9 @@ class TargetView(BaseModel):
     manual_review_count: int = 0
     resume_strategy: str = ""
     resume_reason: str = ""
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    constraint_violations: list[str] = Field(default_factory=list)
+    constraint_violation_events: list[dict[str, Any]] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -114,6 +127,9 @@ class TargetPreviewView(BaseModel):
     recent_failed_steps: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
     low_value_rounds: int = 0
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    constraint_violations: list[str] = Field(default_factory=list)
+    constraint_violation_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TargetStateDiffView(BaseModel):
@@ -206,3 +222,24 @@ class MCPDiagnosticsView(BaseModel):
     placeholder_services: int = 0
     tool_count: int = 0
     services: list[MCPServiceView] = Field(default_factory=list)
+
+
+class ConstraintAuditEventView(BaseModel):
+    target: str
+    timestamp: str = ""
+    code: str = ""
+    severity: str = ""
+    source: str = ""
+    action: str = ""
+    tool_name: str = ""
+    phase: str = ""
+    summary: str = ""
+    detail: str = ""
+
+
+class ConstraintAuditView(BaseModel):
+    total_events: int = 0
+    high_severity_events: int = 0
+    by_source: dict[str, int] = Field(default_factory=dict)
+    by_code: dict[str, int] = Field(default_factory=dict)
+    recent_events: list[ConstraintAuditEventView] = Field(default_factory=list)

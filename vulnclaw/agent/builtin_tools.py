@@ -13,6 +13,9 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
+from urllib.parse import urlparse
+
+from vulnclaw.agent.constraint_policy import validate_tool_action
 
 
 BLOCKED_PATTERNS: list[str] = [
@@ -67,6 +70,25 @@ LAB_MODE_PATTERNS: list[str] = [
 
 async def execute_mcp_tool(agent: Any, tool_name: str, args: dict[str, Any]) -> str:
     """Execute a tool call via MCP manager or built-in tools."""
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is not None:
+        tool_violation = validate_tool_action(tool_name, args, constraints)
+        if tool_violation is not None:
+            if session is not None and hasattr(session, "add_constraint_violation_event"):
+                from vulnclaw.agent.constraint_policy import infer_tool_action
+
+                session.add_constraint_violation_event(
+                    source="tool",
+                    action=infer_tool_action(tool_name, args),
+                    tool_name=tool_name,
+                    code="tool_action_blocked",
+                    severity="high",
+                    summary=tool_violation,
+                    detail=json.dumps(args, ensure_ascii=False)[:500],
+                )
+            return f"[constraint_violation] {tool_violation}"
+
     if tool_name == "python_execute":
         return await execute_python(agent, args)
 
@@ -133,6 +155,103 @@ async def execute_mcp_tool(agent: Any, tool_name: str, args: dict[str, Any]) -> 
         return str(result)
     except Exception as e:
         return f"[!] 工具执行错误 ({tool_name}): {e}"
+
+
+def enforce_port_constraints(agent: Any, ports: list[int], *, target: str = "") -> str | None:
+    """Return a user-facing violation message when requested ports are out of scope."""
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is None or constraints.is_empty():
+        return None
+
+    if constraints.allowed_ports:
+        disallowed = [port for port in ports if port not in constraints.allowed_ports]
+        if disallowed:
+            allowed = ", ".join(str(p) for p in constraints.allowed_ports)
+            denied = ", ".join(str(p) for p in disallowed)
+            suffix = f" for target {target}" if target else ""
+            return f"[constraint_violation] Port(s) {denied} are outside allowed scope [{allowed}]{suffix}."
+
+    blocked = [port for port in ports if port in constraints.blocked_ports]
+    if blocked:
+        denied = ", ".join(str(p) for p in blocked)
+        suffix = f" for target {target}" if target else ""
+        return f"[constraint_violation] Port(s) {denied} are blocked by task constraints{suffix}."
+
+    return None
+
+
+def enforce_host_path_constraints(agent: Any, *, host: str = "", path: str = "", target: str = "") -> str | None:
+    """Return a user-facing violation when host/path are out of scope."""
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is None or constraints.is_empty():
+        return None
+
+    if constraints.allowed_hosts and host and host not in constraints.allowed_hosts:
+        allowed = ", ".join(constraints.allowed_hosts)
+        return f"[constraint_violation] Host {host} is outside allowed scope [{allowed}] for target {target or host}."
+
+    if host and host in constraints.blocked_hosts:
+        return f"[constraint_violation] Host {host} is blocked by task constraints for target {target or host}."
+
+    if constraints.allowed_paths and path and path not in constraints.allowed_paths:
+        allowed = ", ".join(constraints.allowed_paths)
+        return f"[constraint_violation] Path {path} is outside allowed scope [{allowed}] for target {target or host}."
+
+    if path and path in constraints.blocked_paths:
+        return f"[constraint_violation] Path {path} is blocked by task constraints for target {target or host}."
+
+    return None
+
+
+def infer_ports_from_nmap_args(args: dict[str, Any]) -> list[int]:
+    """Infer concrete target ports from nmap arguments for constraint checks."""
+    custom_ports = str(args.get("ports", "") or "").strip()
+    scan_type = str(args.get("scan_type", "top_ports") or "top_ports")
+
+    if custom_ports:
+        ports: list[int] = []
+        for chunk in custom_ports.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "-" in chunk:
+                start_text, end_text = chunk.split("-", 1)
+                try:
+                    start = int(start_text)
+                    end = int(end_text)
+                except ValueError:
+                    continue
+                if 0 < start <= end <= 65535:
+                    ports.extend(range(start, end + 1))
+                continue
+            try:
+                port = int(chunk)
+            except ValueError:
+                continue
+            if 0 < port <= 65535:
+                ports.append(port)
+        return sorted(set(ports))
+
+    if scan_type == "top_ports":
+        return []
+    return []
+
+
+def infer_port_from_url(url: str) -> int | None:
+    """Infer request port from URL."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.port:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
 
 
 def build_openai_tools(mcp_manager: Any) -> list[dict[str, Any]]:
@@ -263,6 +382,14 @@ async def execute_nmap(agent: Any, args: dict[str, Any]) -> str:
     target = args.get("target", "").strip()
     if not target:
         return "[!] nmap_scan 需要 target 参数（目标 IP 或域名）"
+
+    host_violation = enforce_host_path_constraints(agent, host=target.lower(), target=target)
+    if host_violation:
+        return host_violation
+
+    violation = enforce_port_constraints(agent, infer_ports_from_nmap_args(args), target=target)
+    if violation:
+        return violation
 
     try:
         ips = socket.getaddrinfo(target, None, socket.AF_INET)
@@ -487,6 +614,17 @@ async def execute_python(agent: Any, args: dict[str, Any]) -> str:
     purpose = args.get("purpose", "")
     if not code.strip():
         return "[!] Code is empty; nothing executed"
+
+    url_matches = re.findall(r"https?://([a-zA-Z0-9._:-]+)(/[^\s'\"`]*)?", code)
+    for host, path in url_matches:
+        host_violation = enforce_host_path_constraints(
+            agent,
+            host=host.lower(),
+            path=(path or "").rstrip("/"),
+            target=host,
+        )
+        if host_violation:
+            return host_violation
 
     safety = getattr(agent.config, "safety", None)
     if safety is None or not safety.enable_python_execute:

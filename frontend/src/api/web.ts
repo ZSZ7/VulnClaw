@@ -1,5 +1,6 @@
 import type {
   ConfigView,
+  ConstraintAuditView,
   ConfigUpdateRequest,
   MCPDiagnosticsView,
   ReportListItem,
@@ -37,6 +38,10 @@ export function getConfig(): Promise<ConfigView> {
 
 export function getMcpDiagnostics(): Promise<MCPDiagnosticsView> {
   return requestJson<MCPDiagnosticsView>("/api/mcp");
+}
+
+export function getConstraintAudit(): Promise<ConstraintAuditView> {
+  return requestJson<ConstraintAuditView>("/api/constraint-audit");
 }
 
 export function updateConfig(payload: ConfigUpdateRequest): Promise<ConfigView> {

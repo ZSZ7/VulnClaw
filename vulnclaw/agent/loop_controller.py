@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from typing import Any, Callable
 
+from vulnclaw.agent.constraint_policy import validate_phase_transition
 from vulnclaw.agent.context import PentestPhase
 from vulnclaw.agent.llm_client import call_llm_auto
 from vulnclaw.agent.ctf_mode import update_ctf_state
@@ -57,15 +58,30 @@ async def auto_pentest(
                 agent._update_recon_dimension_completion(response_text)
 
             new_phase = agent._detect_phase_from_output(response_text)
+            phase_violation = None
             if new_phase and new_phase != agent.context.state.phase:
-                agent.context.state.advance_phase(new_phase)
-                result.phase = new_phase.value
+                phase_violation = validate_phase_transition(new_phase, agent.context.state.task_constraints)
+                if phase_violation:
+                    agent.context.state.add_constraint_violation_event(
+                        source="phase",
+                        action="exploit" if hasattr(new_phase, "value") and new_phase.value == "漏洞利用" else "",
+                        code="phase_transition_blocked",
+                        severity="high",
+                        summary=phase_violation,
+                        detail=response_text[:500],
+                    )
+                    result.output = f"{response_text}\n[!] {phase_violation}"
+                    result.should_continue = False
+                else:
+                    agent.context.state.advance_phase(new_phase)
+                    result.phase = new_phase.value
 
-            result.should_continue = not agent._is_completion_signal(response_text)
+            if phase_violation is None:
+                result.should_continue = not agent._is_completion_signal(response_text)
 
             result.should_continue = update_ctf_state(agent, response_text, result.should_continue)
 
-            if agent.runtime.is_recon_phase and not result.should_continue:
+            if agent.runtime.is_recon_phase and not result.should_continue and phase_violation is None:
                 if agent.runtime.is_ctf_mode and agent.runtime.flag_verified and agent.runtime.claimed_flag:
                     pass
                 elif round_num < RECON_MIN_ROUNDS:
@@ -192,10 +208,16 @@ async def persistent_pentest(
             return _on_step
 
         try:
+            constraints_block = ""
+            if getattr(agent.context.state, "task_constraints", None):
+                rendered = agent.context.state.task_constraints.to_prompt_block()
+                if rendered:
+                    constraints_block = f"\n\n{rendered}"
             results = await agent.auto_pentest(
                 user_input=(
                     f"[Persistent Cycle {cycle_num}] 继续对目标 {agent.context.state.target or '未知'} 进行渗透测试。"
                     f"这是第 {cycle_num} 个周期，保持之前的所有发现继续深入。"
+                    f"{constraints_block}"
                     if cycle_num > 1 else user_input
                 ),
                 target=agent.context.state.target,

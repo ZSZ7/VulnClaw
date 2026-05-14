@@ -9,6 +9,9 @@ class DummyRuntime:
 class DummySession:
     def __init__(self, target="https://example.com"):
         self.target = target
+        from vulnclaw.agent.context import TaskConstraints
+
+        self.task_constraints = TaskConstraints()
 
 
 class DummySafety:
@@ -121,3 +124,67 @@ class TestBuiltinMcpExecution:
         assert "navigated to page" in result
         assert "[structured]" in result
         assert '"status": "ok"' in result
+
+    async def test_execute_fetch_blocks_tool_level_exploit_when_only_recon_allowed(self):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        class DummyMcpManager:
+            async def call_tool(self, tool_name, args):
+                return {"ok": True, "content": "should not run", "structured_content": {}}
+
+        agent = DummyAgent()
+        agent.mcp_manager = DummyMcpManager()
+        agent.session_state.task_constraints.allowed_actions = ["recon"]
+        agent.session_state.task_constraints.strict_mode = True
+
+        result = await builtin_tools.execute_mcp_tool(
+            agent,
+            "fetch",
+            {"url": "https://example.com/login?id=1' OR 1=1--", "method": "GET"},
+        )
+        assert "constraint_violation" in result
+        assert "tool 'fetch'" in result
+
+    async def test_execute_python_blocks_tool_level_exploit_when_only_recon_allowed(self):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = DummyAgent()
+        agent.session_state.task_constraints.allowed_actions = ["recon"]
+        agent.session_state.task_constraints.strict_mode = True
+
+        result = await builtin_tools.execute_mcp_tool(
+            agent,
+            "python_execute",
+            {"code": "import requests\nrequests.get('https://example.com/admin?cmd=whoami')"},
+        )
+        assert "constraint_violation" in result
+        assert "tool 'python_execute'" in result
+
+    async def test_execute_python_blocks_blocked_host(self):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = DummyAgent()
+        agent.session_state.task_constraints.blocked_hosts = ["example.com"]
+        agent.session_state.task_constraints.strict_mode = True
+
+        result = await builtin_tools.execute_python(
+            agent,
+            {"code": "import requests\nrequests.get('https://example.com/admin')"},
+        )
+        assert "constraint_violation" in result
+        assert "Host example.com" in result
+
+    async def test_execute_nmap_blocks_out_of_scope_port(self):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = DummyAgent()
+        agent.session_state.task_constraints.allowed_ports = [443]
+        agent.session_state.task_constraints.strict_mode = True
+
+        result = await builtin_tools.execute_nmap(
+            agent,
+            {"target": "example.com", "ports": "80", "scan_type": "tcp"},
+        )
+        assert "constraint_violation" in result
+        assert "80" in result
+        assert "443" in result

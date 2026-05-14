@@ -46,6 +46,28 @@ export function TargetStatePage({ selectedTarget, onSelectTarget }: TargetStateP
     };
   }, [targetQuery.data]);
 
+  const targetViolationLabels = useMemo(() => {
+    const events = targetQuery.data?.constraint_violation_events ?? [];
+    if (events.length > 0) {
+      return events.map((item, index) => {
+        const event = item as { source?: string; severity?: string; summary?: string };
+        return `${index + 1}. [${event.severity ?? "unknown"}|${event.source ?? "unknown"}] ${event.summary ?? ""}`;
+      });
+    }
+    return targetQuery.data?.constraint_violations ?? [];
+  }, [targetQuery.data]);
+
+  const previewViolationLabels = useMemo(() => {
+    const events = previewQuery.data?.constraint_violation_events ?? [];
+    if (events.length > 0) {
+      return events.map((item, index) => {
+        const event = item as { source?: string; severity?: string; summary?: string };
+        return `${index + 1}. [${event.severity ?? "unknown"}|${event.source ?? "unknown"}] ${event.summary ?? ""}`;
+      });
+    }
+    return previewQuery.data?.constraint_violations ?? [];
+  }, [previewQuery.data]);
+
   async function handleRollback(snapshotId: string) {
     if (!targetValue) return;
     try {
@@ -177,6 +199,20 @@ export function TargetStatePage({ selectedTarget, onSelectTarget }: TargetStateP
             </div>
           )}
 
+          {targetQuery.data.constraints && Object.keys(targetQuery.data.constraints).length > 0 && (
+            <div className="inline-panel">
+              <span className="stat-label">Task Constraints</span>
+              <strong>{JSON.stringify(targetQuery.data.constraints)}</strong>
+            </div>
+          )}
+
+          {targetViolationLabels.length > 0 && (
+            <div className="inline-panel">
+              <span className="stat-label">Constraint Violations Blocked</span>
+              <strong>{targetViolationLabels.join(" | ")}</strong>
+            </div>
+          )}
+
           {previewQuery.data && (
             <div className="split-grid inner-grid">
               <article className="card inset-card">
@@ -198,6 +234,22 @@ export function TargetStatePage({ selectedTarget, onSelectTarget }: TargetStateP
                   <div className="list-item">
                     <strong>Low-value Rounds</strong>
                     <span>{previewQuery.data.low_value_rounds}</span>
+                  </div>
+                  <div className="list-item">
+                    <strong>Constraints</strong>
+                    <span className="muted-inline">
+                      {Object.keys(previewQuery.data.constraints).length
+                        ? JSON.stringify(previewQuery.data.constraints)
+                        : "none"}
+                    </span>
+                  </div>
+                  <div className="list-item">
+                    <strong>Blocked Violations</strong>
+                    {previewViolationLabels.length ? (
+                      previewViolationLabels.map((item) => <span key={item}>{item}</span>)
+                    ) : (
+                      <span className="muted-inline">none</span>
+                    )}
                   </div>
                 </div>
               </article>

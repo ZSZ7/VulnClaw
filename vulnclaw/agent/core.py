@@ -31,6 +31,7 @@ from vulnclaw.agent.prompt_context import build_round_context, generate_attack_s
 from vulnclaw.agent.input_analysis import (
     detect_phase,
     detect_target,
+    extract_task_constraints,
     extract_user_vuln_hint,
     get_payload_examples,
 )
@@ -110,15 +111,34 @@ class AgentCore:
     ) -> None:
         """Reset per-run runtime state to avoid cross-run contamination."""
         user_lower = user_input.lower() if user_input else ""
+        existing_constraints = self.context.state.task_constraints
+        parsed_constraints = extract_task_constraints(user_input) if user_input else self.context.state.task_constraints
+        if (
+            user_input
+            and "[Persistent Cycle " in user_input
+            and parsed_constraints.allowed_ports == []
+            and parsed_constraints.blocked_ports == []
+            and parsed_constraints.allowed_actions == []
+            and parsed_constraints.blocked_actions == []
+            and parsed_constraints.allowed_paths == []
+            and parsed_constraints.blocked_paths == []
+        ):
+            parsed_constraints = existing_constraints
+        elif parsed_constraints.is_empty():
+            parsed_constraints = self.context.state.task_constraints
         self.runtime = RuntimeState(
             auto_skill_input=user_input,
             user_vuln_hint=self._extract_user_vuln_hint(user_input) if user_input else "",
+            task_constraints=parsed_constraints,
             is_recon_phase=detected_phase == PentestPhase.RECON,
             is_ctf_mode=any(
                 kw in user_lower for kw in ["ctf", "flag", "夺旗", "解题", "找flag", "找出flag"]
             ),
         )
         self.runtime.user_vuln_hint_rounds = 3 if self.runtime.user_vuln_hint else 0
+        self.context.state.task_constraints = self.runtime.task_constraints
+        if self.mcp_manager and hasattr(self.mcp_manager, "set_task_constraints"):
+            self.mcp_manager.set_task_constraints(self.context.state.task_constraints)
 
         self.context.state.recon_dimensions_completed = {
             "server": False,

@@ -1,10 +1,10 @@
-﻿"""VulnClaw CLI Module Tests 鈥?main.py"""
+"""VulnClaw CLI module tests for main.py."""
 
 import pytest
 from typer.testing import CliRunner
 
 
-# 鈹€鈹€ CLI smoke tests 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# CLI smoke tests
 
 class TestCLI:
     """Test CLI entry point and sub-commands."""
@@ -255,6 +255,98 @@ class TestCLI:
         result = runner.invoke(app, ["run", "https://example.com"])
         assert result.exit_code == 0
         assert called == [("run", "https://example.com")]
+
+    def test_run_cli_constraints_are_appended_to_prompt(self, runner, monkeypatch):
+        from vulnclaw.cli.main import app
+        import vulnclaw.cli.main as cli_main
+        from vulnclaw.config.schema import VulnClawConfig
+
+        config = VulnClawConfig()
+        config.llm.api_key = "test-key"
+        monkeypatch.setattr(cli_main, "load_config", lambda: config)
+
+        prompts = []
+
+        async def fake_orchestrated(*, command, target, resume, snapshot, runner):
+            class DummyAgent:
+                async def auto_pentest(self, prompt, **kwargs):
+                    prompts.append(prompt)
+                    return []
+
+            await runner(DummyAgent(), config)
+            return type("RunResult", (), {"summary": {"findings_count": 0}})()
+
+        monkeypatch.setattr(cli_main, "_run_cli_orchestrated_task", fake_orchestrated)
+
+        result = runner.invoke(
+            app,
+            ["run", "https://example.com", "--only-port", "443", "--only-host", "example.com", "--only-path", "/admin"],
+        )
+        assert result.exit_code == 0
+        assert prompts
+        assert "Only test port 443" in prompts[0]
+        assert "Only test host example.com" in prompts[0]
+        assert "Only test path /admin" in prompts[0]
+
+    def test_run_cli_blocked_host_and_path_are_appended_to_prompt(self, runner, monkeypatch):
+        from vulnclaw.cli.main import app
+        import vulnclaw.cli.main as cli_main
+        from vulnclaw.config.schema import VulnClawConfig
+
+        config = VulnClawConfig()
+        config.llm.api_key = "test-key"
+        monkeypatch.setattr(cli_main, "load_config", lambda: config)
+
+        prompts = []
+
+        async def fake_orchestrated(*, command, target, resume, snapshot, runner):
+            class DummyAgent:
+                async def auto_pentest(self, prompt, **kwargs):
+                    prompts.append(prompt)
+                    return []
+
+            await runner(DummyAgent(), config)
+            return type("RunResult", (), {"summary": {"findings_count": 0}})()
+
+        monkeypatch.setattr(cli_main, "_run_cli_orchestrated_task", fake_orchestrated)
+
+        result = runner.invoke(
+            app,
+            ["run", "https://example.com", "--blocked-host", "staging.example.com", "--blocked-path", "/internal"],
+        )
+        assert result.exit_code == 0
+        assert prompts
+        assert "Blocked host staging.example.com" in prompts[0]
+        assert "Blocked path /internal" in prompts[0]
+
+    def test_cli_blocks_command_when_allowed_actions_conflict(self, runner, monkeypatch):
+        from vulnclaw.cli.main import app
+        import vulnclaw.cli.main as cli_main
+        from vulnclaw.config.schema import VulnClawConfig
+
+        config = VulnClawConfig()
+        config.llm.api_key = "test-key"
+        monkeypatch.setattr(cli_main, "load_config", lambda: config)
+        monkeypatch.setattr(cli_main, "_append_cli_constraints", lambda prompt, only_port, only_host, only_path: f"{prompt} 仅做信息收集。")
+
+        result = runner.invoke(app, ["run", "https://example.com"])
+        assert result.exit_code == 1
+        assert "constraint_violation" in result.output
+
+    def test_cli_blocks_command_with_explicit_allow_actions_option(self, runner):
+        from vulnclaw.cli.main import app
+        import vulnclaw.cli.main as cli_main
+        from vulnclaw.config.schema import VulnClawConfig
+
+        config = VulnClawConfig()
+        config.llm.api_key = "test-key"
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(cli_main, "load_config", lambda: config)
+
+        result = runner.invoke(app, ["run", "https://example.com", "--allow-actions", "recon"])
+        monkeypatch.undo()
+        assert result.exit_code == 1
+        assert "constraint_violation" in result.output
 
     def test_persistent_command_uses_correct_cycle_callback(self, runner, monkeypatch):
         from vulnclaw.cli.main import app

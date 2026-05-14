@@ -8,6 +8,11 @@ from typing import Any
 def build_round_context(agent: Any, round_num: int, max_rounds: int) -> str:
     """Build context string for the current round in auto loop."""
     state = agent.context.state
+    constraints_summary = ""
+    constraints_block = state.get_constraints_prompt_block() if hasattr(state, "get_constraints_prompt_block") else ""
+    if constraints_block:
+        constraints_summary = f"\n\n{constraints_block}"
+
     findings_summary = ""
     if state.findings:
         findings_summary = f"\n已发现漏洞: {len(state.findings)} 个"
@@ -238,6 +243,7 @@ def build_round_context(agent: Any, round_num: int, max_rounds: int) -> str:
         f"\n当前目标: {state.target or '未设置'}"
         f"\n当前阶段: {state.phase.value}"
         f"\n输出目录: {agent.config.session.output_dir.resolve()}"
+        f"{constraints_summary}"
         f"{user_hint_directive}"
         f"{findings_summary}"
         f"{facts_summary}"

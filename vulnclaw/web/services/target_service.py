@@ -92,6 +92,12 @@ def _build_target_view(raw: dict) -> TargetView:
         manual_review_count=len(session.get_manual_review_findings()) if hasattr(session, "get_manual_review_findings") else 0,
         resume_strategy=resume_meta.get("resume_strategy", ""),
         resume_reason=resume_meta.get("resume_strategy_reason", ""),
+        constraints=session.task_constraints.model_dump(mode="json") if hasattr(session, "task_constraints") else {},
+        constraint_violations=list(getattr(session, "constraint_violations", [])),
+        constraint_violation_events=[
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            for item in getattr(session, "constraint_violation_events", [])
+        ],
         raw=raw,
     )
 
